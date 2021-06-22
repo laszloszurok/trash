@@ -13,4 +13,4 @@ This project was inpired by [torque](https://github.com/dylanaraps/torque/blob/m
 
 ## Usage
 
-Just run trash. You can lauch transmission-daemon by pressing the 'l' key. You can also terminate it with by pressing 't'. All keybindings will be listed at the bottom while trash is running.
+Just run trash. You can lauch transmission-daemon by pressing the 'l' key. You can also terminate it by pressing 't'. All keybindings will be listed at the bottom while trash is running.
