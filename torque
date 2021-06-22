@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+
+save_term() { printf '\e[?1049h'; stty_orig=$(stty -g); } # saves the state of the terminal
+restore_term() { printf '\e[?1049l'; stty "$stty_orig"; } # restores the state of the terminal
+clear_screen() { printf '\e[2J'; }
+hide_cursor() { printf '\e[?25l'; }
+show_cursor() { printf '\e[?25h'; }
+reset_color() { printf "\e[0m"; }
+enable_line_wrap() { printf '\e[?7h'; }
+disable_line_wrap() { printf '\e[?7l'; }
+
+# put the cursor to ($2, $1) (line, column) (y, x)
+# use: move_cursor_xy x y
+move_cursor_xy() { printf '\e[%d;%dH' "$2" "$1"; }
+
+# move cursor relatively to the current position by $2 steps in the given direction
+# use: move_cursor_steps "down" 3
+# move_cursor_steps() {
+#     case $1 in
+#         "up") printf '\e[%dA' "$2" ;;
+#         "down") printf '\e[%sB' "$2" ;;
+#         "left") printf '\e[%dD' "$2" ;;
+#         "right") printf '\e[%sC' "$2" ;;
+#     esac
+# }
+
+# posix solution to get the current window size
+get_window_size() {
+    read -r LINES COLUMNS < <(stty size)
+}
+
+refresh() {
+    stty -echo # turn-off echoing (key presses won't be shown)
+    get_window_size
+    clear_screen
+    hide_cursor
+    move_cursor_xy 0 0
+
+    ((j=(LINES-2)/3))
+}
+
+# display info bar in the last line
+show_info_bar() {
+    move_cursor_xy 0 "$LINES"
+    printf "\e[K\e[2m%s\e[m" "$1"
+}
+
+# list torrents and draw info bar
+draw() {
+    if [ -z "$(pidof transmission-daemon)" ]; then
+        show_msg_xy 0 0 "transmission-daemon is not running"
+        j=0
+    else
+        IFS=$'\n' read -d "" -ra torrents < <(transmission-remote -l) # get the list of torrents
+        unset 'torrents[0]' 'torrents[-1]' 2>/dev/null # first and last lines of 'transmission-remote -l' are not needed
+
+        torrents=("${torrents[@]}")
+        
+        if [ "${#torrents[@]}" -eq 0 ]; then
+            show_msg_xy 0 0 "No torrents added"
+            j=0
+        else
+            for((i=${k:=0};i<(j=j>${#torrents[@]}?${#torrents[@]}:j);i++));{ print_torrent "${torrents[i]}"; }
+        fi
+    fi
+
+    bar_str="[s]tart [p]ause [r]emove [o]pen [l]aunch daemon [t]erminate daemon [q]uit [j/k] scroll ($j/${#torrents[@]})"
+    bar_length=${#bar_str}
+
+    show_info_bar "$bar_str"
+
+    if [ "$bar_length" -gt "$COLUMNS" ]; then
+        show_msg_xy "$((COLUMNS-3))" "$LINES" "..."
+    fi
+
+    move_cursor_xy 0 0
+}
+
+# display informations about a torrent
+print_torrent() {
+    IFS=" %" read -r id _ <<< "$1" # get the id of the current torrent
+
+    info=$(transmission-remote -t "$id" -i | \
+        grep -E "Name|State|Percent Done|ETA|Download Speed|Upload Speed|Have|Availability|Total size|Ratio:")
+
+    # save the lines of $info into separate variables and format them
+
+    name=$(sed -n -e '1{p;q}' <(printf "%s" "$info"))
+    name=${name:8}
+
+    state=$(sed -n -e '2{p;q}' <(printf "%s" "$info"))
+    state=${state:9}
+    state=${state//Up & Down/Active}
+    state=${state//Downloading/Active}
+
+    percent_done=$(sed -n -e '3{p;q}' <(printf "%s" "$info"))
+    percent_done=${percent_done:16}
+    percent_done=${percent_done/-nan/0}
+
+    eta=$(sed -n -e '4{p;q}' <(printf "%s" "$info"))
+    eta=${eta:2}
+    eta=${eta%%(*} 
+
+    down_speed=$(sed -n -e '5{p;q}' <(printf "%s" "$info"))
+    down_speed=${down_speed:18}
+
+    up_speed=$(sed -n -e '6{p;q}' <(printf "%s" "$info"))
+    up_speed=${up_speed:16}
+
+    downloaded=$(sed -n -e '7{p;q}' <(printf "%s" "$info"))
+    downloaded=${downloaded:8}
+    downloaded=${downloaded/None/0 MB}
+    downloaded=${downloaded%%(*}
+
+    availability=$(sed -n -e '8{p;q}' <(printf "%s" "$info"))
+    availability=${availability:2}
+
+    total_size=$(sed -n -e '9{p;q}' <(printf "%s" "$info"))
+    total_size=${total_size:14}
+    total_size=${total_size%%(*}
+    total_size=${total_size/: -nan%/calculating}
+
+    ratio=$(sed -n -e '10{p;q}' <(printf "%s" "$info"))
+    ratio=${ratio:2}
+
+    printf "\e[K\e[2m%s" "$id: " # print id with gray color
+
+    # print name
+    if [ "$percent_done" = "100%" ]; then
+        printf "\e[1;32m%s\n" "$name" # bold green
+    else
+        printf "\e[1;33m%s\n" "$name" # bold yellow
+    fi
+
+    reset_color
+
+    # print remaining info
+    separator=' | '
+    printf "\e[K%s$separator%s$separator%s$separator%s$separator%s$separator%s$separator%s\n\n" \
+           "   $state" "$downloaded / $total_size $percent_done" "⇣ $down_speed" "⇡ $up_speed" "$ratio" "$availability" "$eta"
+}
+
+# send commands to transmission-remote
+send() { transmission-remote "$@" > /dev/null; }
+
+# show the cursor at the bottom of the screen and read user input
+show_prompt() {
+    reset_color
+    move_cursor_xy 0 "$(($LINES-1))"
+    show_cursor
+    stty "$stty_orig" # enable displaying of user input while a prompt is open
+
+    # Tricky workaround to cancel the prompt when the user presses escape.
+    # In bash read -e will use readline, which will exit with status 1 when 
+    # ctrl+d is the only input. So we have to clear the input, then send 
+    # ctrl+d when esc is pressed.
+    set -o emacs # emacs mode to be able to rebind keys
+    bind '"\C-w": kill-whole-line' # bind ctrl+w to delete the input
+    bind '"\e": "\C-w\C-d"' # bind esc to ctrl+w ctrl+d
+    bind '"\e\e": "\C-w\C-d"' # bind esc+esc to ctrl+w ctrl+d (user presses esc muliple times fast)
+    read -rep "$1" || return # return if read exits with status 1
+}
+
+# print a message beginning at the given coordinates
+# use: show_msg_xy x y msg
+show_msg_xy() {
+    move_cursor_xy "$1" "$2"
+    hide_cursor
+    if [ "$3" = "..." ]; then
+        # ... indicates that the bar at the bottom cannot be fully displayed
+        # print ... with the same color as the bar
+        printf "\e[K\e[2m%s\em" "$3" 
+    else
+        # print message with default color
+        reset_color
+        printf "\e[K%s" "$3"
+    fi
+}
+
+launch_daemon() {
+    if [ -z "$(pidof transmission-daemon)" ]; then
+        show_msg_xy 0 $((LINES-1)) "launching transmission-daemon..."
+        show_msg_xy 0 0 "Connecting..."
+        setsid -f transmission-daemon
+        # it takes a little time for the daemon to launch and the UI
+        # would disappear if we not freeze it with sleep
+        sleep 10 
+    else
+        show_msg_xy 0 $((LINES-1)) "daemon is alredy running"
+        sleep 1.5
+    fi
+}
+
+terminate_daemon() {
+    reset_color
+    move_cursor_xy 0 $((LINES-1))
+    show_cursor
+
+    read -rs -n1 -p "terminate transmission-daemon? (y/n) " key
+        case $key in
+            "y") 
+                if [ -n "$(pidof transmission-daemon)" ]; then
+                    killall transmission-daemon && show_msg_xy 0 $((LINES-1)) "terminating transmission-daemon..."
+                    sleep 1.5
+                else
+                    show_msg_xy 0 $((LINES-1)) "no process found"
+                    sleep 1.5
+                fi           
+                ;;
+            *) 
+                return
+                ;;
+        esac
+    
+}
+
+handle_keypress() {
+    case "$1" in
+        s) show_prompt "start torrent: #";  send -t "$REPLY" -s ;;
+        p) show_prompt "pause torrent: #";  send -t "$REPLY" -S ;;
+        r) show_prompt "remove torrent: #"; send -t "$REPLY" -r; k=0 ;;
+        o) show_prompt "path or url: ";     send -a "$REPLY"; k=0 ;;
+        l) launch_daemon ;;
+        t) terminate_daemon ;;
+
+        # handle scrolling
+        j) ((j==${#torrents[@]}))||((k=k>=j?k:++k,j=j<${#torrents[@]}?++j:j)) ;;
+        k) ((k==0))||((k=k<=j?k>0?--k:0:j,j=j>0?--j:j)) ;;
+
+        q) exit 0 ;;
+    esac
+
+    # refresh the screen on scroll
+    [[ "$1" =~ (j|k) ]] || refresh
+}
+
+main() {
+    save_term
+
+    # line wrap can be enabled, but that messes up the scroll logic 
+    # and the drawing of the info bar if there is not enough space
+    disable_line_wrap 
+
+    refresh
+
+    trap 'restore_term; show_cursor' EXIT # restore the terminal window on exit
+    trap 'refresh; k=0' SIGWINCH # refresh on window resize
+
+    # Get the list of torrents from transmission-remote and read keypresses.
+    # The value of REPLY is the letter that the user pressed.
+    # for ex. if 's' is pressed, the 'start torrent' prompt will be displayed
+    for ((;;)); { draw; read -rsN1 -t1 && handle_keypress "$REPLY"; }
+}
+
+main
