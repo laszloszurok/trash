@@ -111,6 +111,7 @@ print_torrent() {
     downloaded=${downloaded:8}
     downloaded=${downloaded/None/0 MB}
     downloaded=${downloaded%%(*}
+    downloaded=${downloaded%${downloaded##*[![:space:]]}}
 
     availability=$(sed -n -e '8{p;q}' <(printf "%s" "$info"))
     availability=${availability:2}
@@ -119,9 +120,11 @@ print_torrent() {
     total_size=${total_size:14}
     total_size=${total_size%%(*}
     total_size=${total_size/: -nan%/calculating}
+    total_size=${total_size%${total_size##*[![:space:]]}}
 
     ratio=$(sed -n -e '10{p;q}' <(printf "%s" "$info"))
     ratio=${ratio:2}
+    ratio=${ratio/None/0}
 
     printf "\e[K\e[2m%s" "$id: " # print id with gray color
 
@@ -137,7 +140,7 @@ print_torrent() {
     # print remaining info
     separator=' | '
     printf "\e[K%s$separator%s$separator%s$separator%s$separator%s$separator%s$separator%s\n\n" \
-           "   $state" "$downloaded / $total_size $percent_done" "⇣ $down_speed" "⇡ $up_speed" "$ratio" "$availability" "$eta"
+           "   $state" "$downloaded / $total_size - $percent_done" "⇣ $down_speed" "⇡ $up_speed" "$ratio" "$availability" "$eta"
 }
 
 # send commands to transmission-remote
