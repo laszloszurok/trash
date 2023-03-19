@@ -51,20 +51,18 @@ draw() {
         show_msg_xy 0 0 "transmission-daemon is not running"
         j=0
     else
-        IFS=$'\n' read -d "" -ra torrents < <(transmission-remote -l) # get the list of torrents
-        unset 'torrents[0]' 'torrents[-1]' 2>/dev/null # first and last lines of 'transmission-remote -l' are not needed
-
-        torrents=("${torrents[@]}")
+        torrents=$(transmission-remote --json --list | jq '.arguments.torrents')
+        num_torrents=$(echo "$torrents" | jq '. | length')
         
-        if [ "${#torrents[@]}" -eq 0 ]; then
+        if [ "$torrents" = "[]" ]; then
             show_msg_xy 0 0 "No torrents added"
             j=0
         else
-            for((i=${k:=0};i<(j=j>${#torrents[@]}?${#torrents[@]}:j);i++));{ print_torrent "${torrents[i]}"; }
+            for((i=${k:=0};i<(j=j>"$num_torrents"?"$num_torrents":j);i++));{ torrent="$(echo "$torrents" | jq ".[$i]")"; print_torrent "$torrent"; }
         fi
     fi
 
-    bar_str="[s]tart [p]ause [r]emove [o]pen [l]aunch daemon [t]erminate daemon [q]uit [j/k] scroll ($j/${#torrents[@]})"
+    bar_str="[s]tart [p]ause [r]emove [a]dd [l]aunch daemon [t]erminate daemon [q]uit [j/k] scroll ($j/$num_torrents)"
     bar_length=${#bar_str}
 
     show_info_bar "$bar_str"
@@ -78,59 +76,64 @@ draw() {
 
 # display informations about a torrent
 print_torrent() {
-    IFS=" %" read -r id _ <<< "$1" # get the id of the current torrent
+    id="$(echo "$1" | jq '.id')"
 
-    info=$(transmission-remote -t "$id" -i | \
-        grep -E "Name|State|Percent Done|ETA|Download Speed|Upload Speed|Have|Availability|Total size|Ratio:")
+    info=$(transmission-remote --json --torrent "$id" --info)
 
     # save the lines of $info into separate variables and format them
 
-    name=$(sed -n -e '1{p;q}' <(printf "%s" "$info"))
-    name=${name:8}
+    name="$(echo "$info" | jq --raw-output '.arguments.torrents[].name')"
 
-    state=$(sed -n -e '2{p;q}' <(printf "%s" "$info"))
-    state=${state:9}
-    state=${state//Up & Down/Active}
-    state=${state//Downloading/Active}
+    state_id="$(echo "$info" | jq --raw-output '.arguments.torrents[].status')"
+    if [ "$state_id" -eq "0" ]; then
+        state="Paused"
+    elif [ "$state_id" -eq "4" ]; then
+        state="Active"
+    elif [ "$state_id" -eq "6" ]; then
+        state="Seeding"
+    else
+        state="$state_id"
+    fi
 
-    percent_done=$(sed -n -e '3{p;q}' <(printf "%s" "$info"))
-    percent_done=${percent_done:16}
-    percent_done=${percent_done/-nan/0}
+    eta="$(echo "$info" | jq --raw-output '.arguments.torrents[].eta')"
+    [ "$eta" -eq "-1" ] || [ "$eta" -eq "-2" ] && eta="0m" || eta="$((eta/60))m"
 
-    eta=$(sed -n -e '4{p;q}' <(printf "%s" "$info"))
-    eta=${eta:2}
-    eta=${eta%%(*} 
+    down_speed="$(echo "$info" | jq --raw-output '.arguments.torrents[].rateDownload')"
+    down_speed="$(numfmt --to=si --format="%.2f" "$down_speed")"
 
-    down_speed=$(sed -n -e '5{p;q}' <(printf "%s" "$info"))
-    down_speed=${down_speed:18}
+    up_speed="$(echo "$info" | jq --raw-output '.arguments.torrents[].rateUpload')"
+    up_speed="$(numfmt --to=si --format="%.2f" "$up_speed")"
 
-    up_speed=$(sed -n -e '6{p;q}' <(printf "%s" "$info"))
-    up_speed=${up_speed:16}
+    downloaded_b="$(echo "$info" | jq --raw-output '.arguments.torrents[].haveValid')"
+    [ "$downloaded_b" = "None" ] && downloaded_b="0"
+    downloaded_gb="$(numfmt --to=si --format="%.2f" "$downloaded_b")"
 
-    downloaded=$(sed -n -e '7{p;q}' <(printf "%s" "$info"))
-    downloaded=${downloaded:8}
-    downloaded=${downloaded/None/0 MB}
-    downloaded=${downloaded%%(*}
-    downloaded=${downloaded%${downloaded##*[![:space:]]}}
+    left_until_done_b="$(echo "$info" | jq --raw-output '.arguments.torrents[].leftUntilDone')"
+    available_b="$(echo "$info" | jq --raw-output '.arguments.torrents[].desiredAvailable')"
 
-    availability=$(sed -n -e '8{p;q}' <(printf "%s" "$info"))
-    availability=${availability:2}
+    if [ "$left_until_done_b" -eq "0" ]; then
+        availability="100"
+    else
+        availability="$((available_b*100/left_until_done_b))"
+    fi
 
-    total_size=$(sed -n -e '9{p;q}' <(printf "%s" "$info"))
-    total_size=${total_size:14}
-    total_size=${total_size%%(*}
-    total_size=${total_size/: -nan%/calculating}
-    total_size=${total_size%${total_size##*[![:space:]]}}
+    total_size_b="$(echo "$info" | jq --raw-output '.arguments.torrents[].totalSize')"
+    total_size_gb="$(numfmt --to=si --format="%.2f" "$total_size_b")"
 
-    ratio=$(sed -n -e '10{p;q}' <(printf "%s" "$info"))
-    ratio=${ratio:2}
-    ratio=${ratio/None/0}
-    ratio=${ratio/0.0/0}
+    if [ "$total_size_b" -eq "0" ]; then
+        percent_done="0"
+    else
+        percent_done=$((downloaded_b*100/total_size_b))
+    fi
+
+    ratio="$(echo "$info" | jq --raw-output '.arguments.torrents[].uploadRatio')"
+    [ "$ratio" = "-1" ] && ratio="0"
+    ratio="$(numfmt --format="%.2f" "$ratio")"
 
     printf "\e[K\e[2m%s" "$id: " # print id with gray color
 
     # print name
-    if [ "$percent_done" = "100%" ]; then
+    if [ "$percent_done" -eq "100" ]; then
         printf "\e[1;32m%s\n" "$name" # bold green
     else
         printf "\e[1;33m%s\n" "$name" # bold yellow
@@ -140,8 +143,10 @@ print_torrent() {
 
     # print remaining info
     separator=' | '
+    # printf "\e[K%s$separator%s$separator%s$separator%s$separator%s$separator%s$separator%s\n\n" \
+    #        "   $state" "$downloaded / $total_size - $percent_done" "⇣ $down_speed" "⇡ $up_speed" "$ratio" "$availability" "$eta"
     printf "\e[K%s$separator%s$separator%s$separator%s$separator%s$separator%s$separator%s\n\n" \
-           "   $state" "$downloaded / $total_size - $percent_done" "⇣ $down_speed" "⇡ $up_speed" "$ratio" "$availability" "$eta"
+           "   $state" "$downloaded_gb / $total_size_gb - $percent_done%" "⇣ $down_speed" "⇡ $up_speed" "$ratio" "$availability%" "$eta"
 }
 
 # send commands to transmission-remote
@@ -150,7 +155,7 @@ send() { transmission-remote "$@" > /dev/null; }
 # show the cursor at the bottom of the screen and read user input
 show_prompt() {
     reset_color
-    move_cursor_xy 0 "$(($LINES-1))"
+    move_cursor_xy 0 "$((LINES-1))"
     show_cursor
     stty "$stty_orig" # enable displaying of user input while a prompt is open
 
@@ -220,10 +225,10 @@ terminate_daemon() {
 
 handle_keypress() {
     case "$1" in
-        s) show_prompt "start torrent: #";  send -t "$REPLY" -s ;;
-        p) show_prompt "pause torrent: #";  send -t "$REPLY" -S ;;
+        s) show_prompt "start torrent: #"; send -t "$REPLY" -s ;;
+        p) show_prompt "pause torrent: #"; send -t "$REPLY" -S ;;
         r) show_prompt "remove torrent: #"; send -t "$REPLY" -r; k=0 ;;
-        o) show_prompt "path or url: ";     send -a "$REPLY"; k=0 ;;
+        a) show_prompt "path or magnet link: "; send -a "$REPLY"; k=0 ;;
         l) launch_daemon ;;
         t) terminate_daemon ;;
 
